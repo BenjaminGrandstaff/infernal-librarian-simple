@@ -439,34 +439,57 @@ boundary:
   document was retrievable and searchable, and infernal-law's own database
   contained zero Librarian-specific tables afterward. This run also
   surfaced a real kernel-side limitation, not a Librarian one -- see
-  "Kernel limitation observed" below.
+  "Kernel limitation found, then fixed" below -- which was fixed and
+  reverified live the same day.
 
-### Kernel limitation observed: enrolled instance leases cannot be renewed
+### Kernel limitation found, then fixed: instance lease renewal
 
 An enrolled instance's lease defaults to 60 seconds
 (`infernal-law`'s `DEFAULT_LEASE_SECONDS`), after which the kernel's
-`ServiceRequestVerifier` rejects every one of that instance's signed
+`ServiceRequestVerifier` rejected every one of that instance's signed
 calls with 401 -- including this service's own `GET /v1/routes/eligible`
 poll. `infernal-law`'s own `kernel::handshakes` module and
-`0005_instance_handshakes.sql` migration model a renewal concept, but no
-HTTP route exposes it in the current MVP kernel, so no client of
-`infernal-client-rs` -- this service included -- has any way to renew a
-lease before it expires. Observed directly: a Librarian instance running
-longer than a minute starts failing every poll with 401 until its process
-restarts and re-enrolls. This is a kernel-side gap (ILK-005 instance
-lifecycle is incomplete, not a Librarian concern) and is not something
-this repository should work around -- there is no Librarian-side fix for
-"the kernel will not let my instance keep talking to it." Filed against
-`infernal-law` rather than papered over here.
+`0005_instance_handshakes.sql` migration model a *different* renewal
+concept (the kernel challenging a push-delivery subscriber), not a route
+a polling client could call to renew its own lease -- no such route
+existed. Observed directly: a Librarian instance running longer than a
+minute started failing every poll with 401 until its process restarted
+and re-enrolled. This was a real gap in ILK-001 instance lifecycle, not a
+Librarian-side problem to route around, so the fix went into
+`infernal-law` itself: a new governed route, `POST /v1/instances/renew`,
+that extends the *calling* instance's own lease (identity taken from the
+caller's already-verified signed request, never a body field, so an
+instance can only ever renew the lease it just proved it currently
+holds) using the compare-and-set `InstanceRegistryService::renew` method
+that already existed in the kernel's domain layer, unreached by any HTTP
+route until now.
+
+Librarian is the reference client for this: `KernelClient::renew_lease`
+signs and sends the renewal call, and `lib.rs`'s `run` loop renews
+proactively -- whenever less than `RENEWAL_MARGIN_SECONDS` (20s) remain
+on the lease this process itself obtained at enrollment -- rather than
+waiting to be locked out. Verified live 2026-08-30: a Librarian instance
+ran for several minutes with zero 401s, renewing five times
+(`lease_revision` 1 through 5) while also completing real governed work
+in between. This client-side renewal only works for a process that
+performs its own enrollment at startup (see `InstanceLease`'s own
+documentation for why); an identity enrolled some other way still has no
+way to discover its own current lease state.
 
 ## Scope discipline
 
 Before proposing a change to `infernal-law` on this project's behalf,
 stop and ask whether it protects authority, communication, or
-correctness. If not, it belongs in Librarian. Nothing in this
-repository's development required a kernel change -- the two genuine
-kernel-side gaps found along the way (no real payload/result channel, and
-no instance lease renewal route) are documented above, not routed around.
+correctness. If not, it belongs in Librarian. This repository's own
+development never required a kernel change to make Librarian's job
+easier. Two genuine kernel-side gaps surfaced along the way: no real
+payload/result channel (documented above, not routed around -- there is
+no correctness case for Librarian inventing one) and no instance lease
+renewal route. The first is intentionally left as a documented
+limitation; the second was a real ILK-001 identity/communication gap --
+squarely kernel-owned, not a convenience for Librarian -- and was fixed
+in `infernal-law` itself (`POST /v1/instances/renew`), not routed around
+in this repository.
 
 ## License
 

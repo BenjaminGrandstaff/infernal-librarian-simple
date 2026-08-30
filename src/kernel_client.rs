@@ -26,6 +26,9 @@ use crate::claims::{
     parse_complete_response,
 };
 use crate::error::LibrarianError;
+use crate::instance_lease::{
+    RENEW_INSTANCE_PATH, RenewedLease, parse_renewal_response, renewal_request_body,
+};
 use crate::routed_request::{RoutedRequestOutcome, parse_routed_request_response};
 use crate::routes::{ELIGIBLE_ROUTES_PATH, EligibleRoute, parse_eligible_routes};
 use crate::subscriptions::{
@@ -116,6 +119,29 @@ impl KernelClient {
         Ok(self
             .client
             .submit_enrollment(&format!("https://{}", self.authority), &submission)?)
+    }
+
+    /// Extends this instance's own registration lease before the kernel's
+    /// default 60-second grant expires -- the kernel has no way to renew a
+    /// lease that has *already* expired (every signed call, including
+    /// this one, is rejected once that happens), so `lib.rs`'s `run` calls
+    /// this proactively, well before the deadline. `expected_revision`
+    /// must be this instance's current `lease_revision`, from the last
+    /// enrollment or renewal -- a stale value is rejected rather than
+    /// silently accepted, the same optimistic-concurrency guard the
+    /// kernel's own work-claim leases use.
+    pub fn renew_lease(&self, expected_revision: i64) -> Result<RenewedLease, LibrarianError> {
+        let body = renewal_request_body(expected_revision);
+        let signed = build_post(
+            &self.credential,
+            &self.authority,
+            RENEW_INSTANCE_PATH,
+            &body,
+            Uuid::new_v4(),
+            unix_time(),
+        )?;
+        let response = self.client.send(&signed)?;
+        parse_renewal_response(response.status, &response.body)
     }
 
     /// Lists Librarian's own currently-active subscriptions.
@@ -324,6 +350,27 @@ mod tests {
         let verified =
             verify_incoming(&incoming_from(&signed), credential.public_key(), 1_005).unwrap();
         assert_eq!(verified.service_id(), credential.public_key().service_id());
+    }
+
+    #[test]
+    fn the_renewal_request_targets_the_instances_path_and_carries_the_expected_revision() {
+        let credential = ClientCredential::generate(Uuid::new_v4());
+        let body = renewal_request_body(3);
+
+        let signed = build_post(
+            &credential,
+            "kernel.example.test",
+            RENEW_INSTANCE_PATH,
+            &body,
+            Uuid::new_v4(),
+            1_000,
+        )
+        .unwrap();
+
+        assert_eq!(signed.parts().method(), "POST");
+        assert_eq!(signed.parts().path_and_query(), RENEW_INSTANCE_PATH);
+        assert_eq!(signed.parts().body(), br#"{"expected_revision":3}"#);
+        verify_incoming(&incoming_from(&signed), credential.public_key(), 1_005).unwrap();
     }
 
     #[test]

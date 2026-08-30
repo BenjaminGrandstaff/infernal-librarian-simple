@@ -16,6 +16,7 @@ pub mod dispatch;
 pub mod domain;
 pub mod error;
 pub mod health;
+pub mod instance_lease;
 pub mod kernel_client;
 pub mod postgres_document_repository;
 pub mod routed_request;
@@ -32,6 +33,7 @@ use crate::claims::ClaimOutcome;
 use crate::database::Database;
 use crate::domain::DocumentRepository;
 use crate::error::LibrarianError;
+use crate::instance_lease::RENEWAL_MARGIN_SECONDS;
 use crate::kernel_client::{KernelClient, KernelPort};
 use crate::postgres_document_repository::PostgresDocumentRepository;
 use crate::routed_request::RoutedRequestOutcome;
@@ -66,6 +68,23 @@ pub struct Config {
     pub repository: PostgresDocumentRepository,
     pub lease_seconds: i64,
     pub poll_interval: Duration,
+    /// This process's own instance lease, tracked only when this process
+    /// performed its own enrollment at startup (see `run`'s renewal
+    /// logic). `None` when `ENROLLMENT_CHALLENGE` was unset because this
+    /// identity was already enrolled some other way -- there is no way to
+    /// discover another process's enrollment's current lease state after
+    /// the fact, so such a process cannot renew and simply keeps today's
+    /// behavior of failing once its lease expires.
+    pub instance_lease: Option<InstanceLease>,
+}
+
+/// This process's own registration lease with the kernel, tracked entirely
+/// client-side from the last enrollment or renewal response so `run` knows
+/// when to renew next and what revision to renew with.
+#[derive(Clone, Copy, Debug)]
+pub struct InstanceLease {
+    pub revision: i64,
+    pub expires_at: i64,
 }
 
 impl Config {
@@ -99,6 +118,7 @@ impl Config {
             }
             Err(_) => KernelClient::new(credential, authority)?,
         };
+        let mut instance_lease = None;
         if let Ok(challenge) = env::var(ENROLLMENT_CHALLENGE_ENV) {
             let endpoint = env::var(SERVICE_ENDPOINT_ENV)
                 .map_err(|_| LibrarianError::MissingEnv(SERVICE_ENDPOINT_ENV))?;
@@ -113,6 +133,10 @@ impl Config {
             let challenge = decode_challenge(&challenge)?;
             let enrolled = client.enroll(challenge, &endpoint, &pod_uid, workload_token)?;
             println!("enrolled with the kernel: {enrolled:?}");
+            instance_lease = Some(InstanceLease {
+                revision: enrolled.lease_revision,
+                expires_at: enrolled.lease_expires_at,
+            });
         }
         // Idempotent: a restarted process must not fail, or create a
         // second subscription, just because one already exists.
@@ -127,6 +151,7 @@ impl Config {
             repository,
             lease_seconds,
             poll_interval: Duration::from_secs(poll_interval_seconds),
+            instance_lease,
         })
     }
 }
@@ -258,12 +283,56 @@ pub fn work_once(
 /// reaching the kernel completion call (see `work_once`), so no
 /// incorrect success was ever reported.
 pub fn run(config: Config) -> ! {
+    let Config {
+        client,
+        repository,
+        lease_seconds,
+        poll_interval,
+        mut instance_lease,
+    } = config;
     loop {
-        match work_once(&config.client, &config.repository, config.lease_seconds) {
+        renew_lease_if_due(&client, &mut instance_lease);
+        match work_once(&client, &repository, lease_seconds) {
             Ok(WorkOutcome::NothingEligible) => {}
             Ok(outcome) => println!("{outcome:?}"),
             Err(error) => eprintln!("work pass failed: {error}"),
         }
-        std::thread::sleep(config.poll_interval);
+        std::thread::sleep(poll_interval);
     }
+}
+
+/// Renews this process's own instance lease well before the kernel's
+/// grant expires -- see `InstanceLease`'s own documentation for why this
+/// is only possible when this process performed its own enrollment at
+/// startup. A failed renewal is logged and retried on the next tick, the
+/// same tolerance `run`'s own work-pass loop already has for a transient
+/// kernel or network hiccup; if every attempt fails before the lease
+/// actually expires, every subsequent signed call -- including the next
+/// renewal attempt -- starts failing until this process restarts and
+/// re-enrolls, exactly as it always has.
+fn renew_lease_if_due(client: &KernelClient, instance_lease: &mut Option<InstanceLease>) {
+    let Some(lease) = instance_lease else {
+        return;
+    };
+    if unix_time() < lease.expires_at - RENEWAL_MARGIN_SECONDS {
+        return;
+    }
+    match client.renew_lease(lease.revision) {
+        Ok(renewed) => {
+            lease.revision = renewed.lease_revision;
+            lease.expires_at = renewed.lease_expires_at;
+            println!("renewed instance lease: {renewed:?}");
+        }
+        Err(error) => eprintln!("instance lease renewal failed: {error}"),
+    }
+}
+
+fn unix_time() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .unwrap_or(i64::MAX)
 }
