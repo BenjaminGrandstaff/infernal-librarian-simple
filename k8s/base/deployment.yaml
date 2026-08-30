@@ -1,0 +1,138 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infernal-librarian-simple
+  labels:
+    app.kubernetes.io/name: infernal-librarian-simple
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: infernal-librarian-simple
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: infernal-librarian-simple
+    spec:
+      # No Kubernetes API privileges: Librarian never calls the
+      # Kubernetes API itself, and the projected token below is scoped
+      # only to the infernal-law-enrollment audience, not the cluster's
+      # own API server.
+      automountServiceAccountToken: false
+      serviceAccountName: infernal-librarian-simple
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: infernal-librarian-simple
+          image: localhost/infernal-librarian-simple:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: health
+              containerPort: 8090
+              protocol: TCP
+          env:
+            # In-cluster DNS name of infernal-law's own Service
+            # (k8s/base/service.yaml in that repo). infernal-client-rs's
+            # SignedRequest always dials https://<authority>, which
+            # reaches infernal-law's tls-proxy sidecar, not its plain-HTTP
+            # listener directly.
+            - name: KERNEL_AUTHORITY
+              value: "infernal-law"
+            # infernal-law's tls-proxy sidecar uses a self-signed
+            # certificate for local/test deployments (see that repo's
+            # README), which this process must be told to trust
+            # explicitly -- see KERNEL_CA_CERT_PATH below and the
+            # kernel-ca-cert volume. Omit both for a kernel with an
+            # ordinary publicly-trusted certificate.
+            - name: KERNEL_CA_CERT_PATH
+              value: /etc/infernal-law/ca/ca.crt
+            # Must already be provisioned as an identities row and
+            # enrolled with the kernel (ADR-0008), with communication
+            # admission enabled and an ILK-002 authority grant for each
+            # of librarian.document.{put,get,search} plus
+            # subscription.create, before this deployment can do
+            # anything -- deployment configuration, not something this
+            # manifest or the image itself performs. See this repo's
+            # README's Kubernetes section.
+            - name: LIBRARIAN_SERVICE_ID
+              value: "00000000-0000-4000-8000-000000000006"
+            # This process has no inbound listener reachable by peers
+            # (only the local-only health endpoint); nothing currently
+            # connects to this address.
+            - name: SERVICE_ENDPOINT
+              value: https://infernal-librarian-simple
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            # Set to a real ADR-0008 challenge (base64url, 32 bytes) from
+            # a kernel operator's own out-of-band challenge issuance to
+            # perform enrollment on the next restart; unset (the default)
+            # skips enrollment entirely. See ENROLLMENT_CHALLENGE's own
+            # documentation in src/lib.rs for why there is no
+            # self-service way to obtain one instead.
+            # - name: ENROLLMENT_CHALLENGE
+            #   value: ""
+            - name: LIBRARIAN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: infernal-librarian-database
+                  key: url
+          volumeMounts:
+            - name: kernel-ca-cert
+              mountPath: /etc/infernal-law/ca
+              readOnly: true
+            - name: enrollment-token
+              mountPath: /var/run/secrets/infernal-law-enrollment
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: health
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 250m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+      volumes:
+        # Not committed: create with, for example,
+        #   kubectl create configmap infernal-law-ca-cert \
+        #     --from-file=ca.crt=infernal-law-tls.crt
+        # using the same self-signed certificate infernal-law's tls-proxy
+        # sidecar serves.
+        - name: kernel-ca-cert
+          configMap:
+            name: infernal-law-ca-cert
+        # A short-lived, auto-rotated token scoped to exactly the
+        # infernal-law-enrollment audience -- distinct from the
+        # ServiceAccount's own identity, which this process never mounts
+        # (automountServiceAccountToken: false) since it has no other use
+        # for it.
+        - name: enrollment-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: infernal-law-enrollment
+                  expirationSeconds: 600
+      terminationGracePeriodSeconds: 10
