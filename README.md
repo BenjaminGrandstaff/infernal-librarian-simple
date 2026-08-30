@@ -427,15 +427,46 @@ boundary:
   Librarian's own process state and confirms the document is still
   retrievable, and confirms directly against infernal-law's own database
   that no Librarian-specific table or row exists there.
+- **Live requester-submission test** (`tests/live_requester_submission.rs`,
+  `#[ignore]`d) -- the same live boundary proven the other way: a separate
+  Requester identity submits real signed `put`, `get`, and `search`
+  Requests against a real deployed kernel, and a genuinely independent,
+  already-running `infernal-librarian-simple` Deployment claims, processes,
+  and completes each one entirely through its own ordinary poll loop --
+  not `work_once` called in-process the way `tests/live_vertical_slice.rs`
+  does. Run 2026-08-30 against a real kind-deployed kernel, evaluator, and
+  two isolated PostgreSQL instances: all three actions completed, the
+  document was retrievable and searchable, and infernal-law's own database
+  contained zero Librarian-specific tables afterward. This run also
+  surfaced a real kernel-side limitation, not a Librarian one -- see
+  "Kernel limitation observed" below.
+
+### Kernel limitation observed: enrolled instance leases cannot be renewed
+
+An enrolled instance's lease defaults to 60 seconds
+(`infernal-law`'s `DEFAULT_LEASE_SECONDS`), after which the kernel's
+`ServiceRequestVerifier` rejects every one of that instance's signed
+calls with 401 -- including this service's own `GET /v1/routes/eligible`
+poll. `infernal-law`'s own `kernel::handshakes` module and
+`0005_instance_handshakes.sql` migration model a renewal concept, but no
+HTTP route exposes it in the current MVP kernel, so no client of
+`infernal-client-rs` -- this service included -- has any way to renew a
+lease before it expires. Observed directly: a Librarian instance running
+longer than a minute starts failing every poll with 401 until its process
+restarts and re-enrolls. This is a kernel-side gap (ILK-005 instance
+lifecycle is incomplete, not a Librarian concern) and is not something
+this repository should work around -- there is no Librarian-side fix for
+"the kernel will not let my instance keep talking to it." Filed against
+`infernal-law` rather than papered over here.
 
 ## Scope discipline
 
 Before proposing a change to `infernal-law` on this project's behalf,
 stop and ask whether it protects authority, communication, or
 correctness. If not, it belongs in Librarian. Nothing in this
-repository's development required a kernel change -- the one genuine
-kernel-side gap found along the way (no real payload/result channel) is
-documented above, not routed around.
+repository's development required a kernel change -- the two genuine
+kernel-side gaps found along the way (no real payload/result channel, and
+no instance lease renewal route) are documented above, not routed around.
 
 ## License
 
