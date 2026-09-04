@@ -119,18 +119,24 @@ impl Config {
             Err(_) => KernelClient::new(credential, authority)?,
         };
         let mut instance_lease = None;
-        if let Ok(challenge) = env::var(ENROLLMENT_CHALLENGE_ENV) {
-            let endpoint = env::var(SERVICE_ENDPOINT_ENV)
-                .map_err(|_| LibrarianError::MissingEnv(SERVICE_ENDPOINT_ENV))?;
-            let pod_uid =
-                env::var(POD_UID_ENV).map_err(|_| LibrarianError::MissingEnv(POD_UID_ENV))?;
+        // Enrollment is driven by SERVICE_ENDPOINT and POD_UID rather than
+        // by ENROLLMENT_CHALLENGE: this process obtains its own challenge
+        // when none was injected, so every Pod of a Deployment enrolls --
+        // not just the first one of a revision. With neither set, this
+        // identity is assumed to have been enrolled some other way and
+        // enrollment is skipped, exactly as before.
+        if let (Ok(endpoint), Ok(pod_uid)) = (env::var(SERVICE_ENDPOINT_ENV), env::var(POD_UID_ENV))
+        {
             let token_path = env::var(WORKLOAD_TOKEN_PATH_ENV)
                 .unwrap_or_else(|_| DEFAULT_WORKLOAD_TOKEN_PATH.to_owned());
             let workload_token = std::fs::read_to_string(&token_path)
                 .map_err(LibrarianError::EnrollmentTokenUnreadable)?
                 .trim()
                 .to_owned();
-            let challenge = decode_challenge(&challenge)?;
+            let challenge = match env::var(ENROLLMENT_CHALLENGE_ENV) {
+                Ok(injected) => decode_challenge(&injected)?,
+                Err(_) => client.request_challenge(&pod_uid, &workload_token)?,
+            };
             let enrolled = client.enroll(challenge, &endpoint, &pod_uid, workload_token)?;
             println!("enrolled with the kernel: {enrolled:?}");
             instance_lease = Some(InstanceLease {

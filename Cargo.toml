@@ -7,7 +7,7 @@ rust-version = "1.85"
 
 [dependencies]
 base64 = "0.22.1"
-infernal-client-rs = { git = "https://github.com/BenjaminGrandstaff/infernal-client-rs", rev = "be3244add8899e253686cdccdf59d8ea71ea79ac" }
+infernal-client-rs = { git = "https://github.com/BenjaminGrandstaff/infernal-client-rs", rev = "f6076f2b294e38366d1ae65d722ca330eb74c246" }
 r2d2 = "0.8.10"
 r2d2_postgres = "0.18.2"
 serde = { version = "1.0", features = ["derive"] }
