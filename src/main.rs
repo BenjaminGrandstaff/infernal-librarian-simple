@@ -15,11 +15,18 @@ fn main() {
     let health_database = config.repository.database().clone();
     let health_address =
         env::var(HEALTH_ADDRESS_ENV).unwrap_or_else(|_| DEFAULT_HEALTH_ADDRESS.to_owned());
+    let heartbeat = health::Heartbeat::new();
+    let health_heartbeat = heartbeat.clone();
     thread::spawn(move || {
-        if let Err(error) = health::serve(&health_address, health_database) {
+        if let Err(error) = health::serve(
+            &health_address,
+            health_database,
+            health_heartbeat,
+            health::Thresholds::default(),
+        ) {
             eprintln!("health endpoint failed: {error}");
         }
     });
 
-    run(config);
+    run(config, heartbeat);
 }
